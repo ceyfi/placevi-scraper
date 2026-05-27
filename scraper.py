@@ -194,6 +194,13 @@ def fetch_json(url, extra_headers=None):
     try:
         with opener.open(req, timeout=20) as resp:
             return json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode('utf-8')
+        except Exception:
+            pass
+        raise Exception(f"fetch_json greška: HTTP {e.code} {e.reason} | body: {body[:500]}")
     except Exception as e:
         raise Exception(f"fetch_json greška: {e}")
 
@@ -201,83 +208,81 @@ def fetch_json(url, extra_headers=None):
 # SCRAPER: HALO OGLASI
 # ============================================================
 
-HALO_LOCATION_SLUGS = [
-    ('novi-beograd', 'Novi Beograd'),
-    ('zemun', 'Zemun'),
-    ('ledine', 'Ledine'),
-    ('bezanija', 'Bezanija'),
-]
+# Jedan URL za sve lokacije: Novi Beograd, Zemun, Ledine, Bezanija
+HALO_URL = "https://www.halooglasi.com/nekretnine/prodaja-stanova/beograd?sort=ValidFromMoment_desc"
 
 def scrape_halooglasi(config):
     results = []
     session = requests.Session()
-    session.trust_env = False  # zaobiđi proxy iz env varijabli
+    session.trust_env = False
     session.headers.update({
         **HEADERS,
         'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Encoding': 'gzip, deflate',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
     })
 
-    for slug, location_name in HALO_LOCATION_SLUGS:
-        url = f"https://www.halooglasi.com/nekretnine/prodaja-stanova/{slug}?sort=ValidFromMoment_desc"
-        logger.info(f"[Halo Oglasi] {url}")
-        try:
-            r = session.get(url, timeout=20, verify=SSL_VERIFY)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, 'html.parser')
+    logger.info(f"[Halo Oglasi] {HALO_URL}")
+    try:
+        r = session.get(HALO_URL, timeout=20, verify=SSL_VERIFY)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
 
-            items = soup.select('.product-item')
-            logger.info(f"[Halo Oglasi] {location_name}: {len(items)} oglasa")
+        items = soup.select('.product-item')
+        logger.info(f"[Halo Oglasi] sve lokacije: {len(items)} oglasa")
 
-            for item in items:
-                try:
-                    link = item.select_one('h3.product-title a, .product-title a, a.ga-title')
-                    if not link:
-                        link = item.select_one('a[href*="/prodaja-stanova/"]')
-                    if not link:
-                        continue
-                    href = link.get('href', '')
-                    raw_id = href.rstrip('/').split('/')[-1].split('?')[0]
-                    listing_id = f"halo_{raw_id}"
-                    title = link.get_text(strip=True) or f"Stan - {location_name}"
+        for item in items:
+            try:
+                link = item.select_one('h3.product-title a, .product-title a, a.ga-title')
+                if not link:
+                    link = item.select_one('a[href*="/prodaja-stanova/"]')
+                if not link:
+                    continue
+                href = link.get('href', '')
+                raw_id = href.rstrip('/').split('/')[-1].split('?')[0]
+                listing_id = f"halo_{raw_id}"
+                title = link.get_text(strip=True) or "Stan na prodaju"
 
-                    price = None
-                    price_el = item.select_one('.price-box-main, [class*="price-main"]')
-                    if price_el:
-                        price = parse_price(price_el.get_text())
+                price = None
+                price_el = item.select_one('.price-box-main, [class*="price-main"]')
+                if price_el:
+                    price = parse_price(price_el.get_text())
 
-                    area = None
-                    for feat in item.select('.product-features li, .features-container li'):
-                        a = parse_area(feat.get_text(strip=True))
-                        if a:
-                            area = a
-                            break
-                    if not area:
-                        area = parse_area(item.get_text())
+                area = None
+                for feat in item.select('.product-features li, .features-container li'):
+                    a = parse_area(feat.get_text(strip=True))
+                    if a:
+                        area = a
+                        break
+                if not area:
+                    area = parse_area(item.get_text())
 
-                    ppm2 = calc_ppm2(price, area)
-                    full_url = href if href.startswith('http') else f"https://www.halooglasi.com{href}"
+                ppm2 = calc_ppm2(price, area)
+                full_url = href if href.startswith('http') else f"https://www.halooglasi.com{href}"
 
-                    results.append({
-                        'id': listing_id,
-                        'title': title,
-                        'location': location_name,
-                        'price': price,
-                        'area': area,
-                        'price_per_m2': ppm2,
-                        'url': full_url,
-                        'source': 'Halo Oglasi',
-                    })
-                except Exception as e:
-                    logger.debug(f"[Halo Oglasi] oglas greška: {e}")
+                # Pokušaj da izvučeš lokaciju iz teksta oglasa
+                location_str = 'Novi Beograd / Zemun'
+                loc_el = item.select_one('.subtitle-places, [class*="subtitle"]')
+                if loc_el:
+                    location_str = loc_el.get_text(strip=True)
 
-        except Exception as e:
-            logger.error(f"[Halo Oglasi] greška za {slug}: {e}")
+                results.append({
+                    'id': listing_id,
+                    'title': title,
+                    'location': location_str,
+                    'price': price,
+                    'area': area,
+                    'price_per_m2': ppm2,
+                    'url': full_url,
+                    'source': 'Halo Oglasi',
+                })
+            except Exception as e:
+                logger.debug(f"[Halo Oglasi] oglas greška: {e}")
 
-        time.sleep(2)
+    except Exception as e:
+        logger.error(f"[Halo Oglasi] greška: {e}")
 
     return results
 
@@ -295,11 +300,47 @@ def scrape_4zida(config):
     targets = config.get('target_locations', ['Novi Beograd', 'Zemun', 'Ledine', 'Bezanija'])
     max_ppm2 = int(config.get('max_price_per_m2', 1500))
 
-    for page in range(1, 6):  # max 5 strana = 300 oglasa
-        api_url = f"https://api.4zida.rs/v6/search/apartments?limit=60&page={page}"
+    # Probaj različite URL formate — API menja šta prima
+    url_candidates = [
+        "https://api.4zida.rs/v6/search/apartments",
+        "https://api.4zida.rs/v6/search/apartments?for=sale",
+        "https://api.4zida.rs/v5/search/apartments",
+    ]
+
+    working_url = None
+    for candidate in url_candidates:
+        logger.info(f"[4zida.rs] Testiram URL: {candidate}")
+        try:
+            test_data = fetch_json(candidate, extra_headers={
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://4zida.rs',
+                'Referer': 'https://4zida.rs/',
+            })
+            if isinstance(test_data, dict) or isinstance(test_data, list):
+                working_url = candidate
+                logger.info(f"[4zida.rs] Radi URL: {candidate}")
+                break
+        except Exception as e:
+            logger.warning(f"[4zida.rs] Ne radi {candidate}: {e}")
+
+    if not working_url:
+        logger.error("[4zida.rs] Nijedan URL ne radi!")
+        return results
+
+    for page in range(1, 16):  # max 15 strana = 300 oglasa
+        # Dodaj paginaciju samo ako base URL radi
+        if page == 1:
+            api_url = working_url
+        else:
+            sep = '&' if '?' in working_url else '?'
+            api_url = f"{working_url}{sep}page={page}"
         logger.info(f"[4zida.rs] strana {page}: {api_url}")
         try:
-            data = fetch_json(api_url)
+            data = fetch_json(api_url, extra_headers={
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://4zida.rs',
+                'Referer': 'https://4zida.rs/',
+            })
             ads = data.get('ads', [])
             if not ads:
                 logger.info(f"[4zida.rs] strana {page}: nema više oglasa, stajemo")
@@ -379,7 +420,11 @@ def scrape_cityexpert(config):
     )
     logger.info(f"[City Expert] {api_url}")
     try:
-        data = fetch_json(api_url, extra_headers={'Referer': 'https://cityexpert.rs/'})
+        data = fetch_json(api_url, extra_headers={
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': 'https://cityexpert.rs',
+            'Referer': 'https://cityexpert.rs/',
+        })
         ads = data.get('result', data.get('results', data.get('data', [])))
         logger.info(f"[City Expert] Beograd: {len(ads)} oglasa")
 
@@ -513,6 +558,12 @@ def main():
 
 if __name__ == '__main__':
     import sys
+
+    # Fix za Windows konzolu koja ne podržava UTF-8 po defaultu
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if sys.stderr.encoding and sys.stderr.encoding.lower() not in ('utf-8', 'utf8'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
     if '--test-telegram' in sys.argv:
         config = load_config()
