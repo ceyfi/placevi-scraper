@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Scraper za stanove u Beogradu
-Prati oglase na Halo Oglasi, Nekretnine.rs, 4zida.rs i City Expert.
+Prati oglase na Halo Oglasi, 4zida.rs i City Expert.
 Šalje Telegram notifikaciju kad nađe stan u željenim lokacijama ispod zadate cene/m².
 """
 
@@ -11,6 +11,8 @@ import os
 import re
 import time
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -99,7 +101,6 @@ def send_telegram(token, chat_id, message):
 def format_message(listing):
     emoji_source = {
         'Halo Oglasi': '🟡',
-        'Nekretnine.rs': '🔵',
         '4zida.rs': '🟢',
         'City Expert': '🔴',
     }
@@ -126,42 +127,32 @@ def format_message(listing):
 # ============================================================
 
 def parse_price(text):
-    """Izvuci cenu u evrima iz teksta."""
     if not text:
         return None
     text = text.strip()
-    # Ukloni sve osim cifara, tačaka i zareza
     cleaned = re.sub(r'[^\d.,]', '', text)
-    # Srpski format: 150.000 ili 150,000 = 150000
-    # Detektuj da li je tačka separator hiljada ili decimalna
     if '.' in cleaned and ',' in cleaned:
-        # 150.000,00 format → ukloni tačke, zarez je decimalna
         cleaned = cleaned.replace('.', '').replace(',', '.')
     elif cleaned.count('.') == 1 and len(cleaned.split('.')[-1]) == 2:
-        # 150000.00 — decimalna tačka
         pass
     else:
-        # 150.000 — tačka je separator hiljada
         cleaned = cleaned.replace('.', '').replace(',', '.')
     try:
         val = float(cleaned)
-        # Sanity check: cene stanova su između 10.000 i 10.000.000
         if 10_000 <= val <= 10_000_000:
             return val
-        # Možda je u hiljadama ili nije EUR
         return None
     except ValueError:
         return None
 
 def parse_area(text):
-    """Izvuci površinu u m² iz teksta."""
     if not text:
         return None
     m = re.search(r'(\d+[\.,]?\d*)\s*m[²2]', text, re.IGNORECASE)
     if m:
         try:
             val = float(m.group(1).replace(',', '.'))
-            if 10 <= val <= 1000:  # sanity: 10-1000 m²
+            if 10 <= val <= 1000:
                 return val
         except ValueError:
             pass
@@ -179,6 +170,18 @@ def is_target_location(location_text, targets):
 def is_good_price(ppm2, max_ppm2):
     return ppm2 is not None and ppm2 <= max_ppm2
 
+def fetch_json(url, extra_headers=None):
+    """Fetch JSON bez URL re-encodinga (fix za 4zida [] problem)."""
+    headers = {**HEADERS, 'Accept': 'application/json'}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        raise Exception(f"fetch_json greška: {e}")
+
 # ============================================================
 # SCRAPER: HALO OGLASI
 # ============================================================
@@ -193,7 +196,14 @@ HALO_LOCATION_SLUGS = [
 def scrape_halooglasi(config):
     results = []
     session = requests.Session()
-    session.headers.update(HEADERS)
+    session.headers.update({
+        **HEADERS,
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    })
 
     for slug, location_name in HALO_LOCATION_SLUGS:
         url = f"https://www.halooglasi.com/nekretnine/prodaja-stanova/{slug}?sort=ValidFromMoment_desc"
@@ -208,7 +218,6 @@ def scrape_halooglasi(config):
 
             for item in items:
                 try:
-                    # URL i ID
                     link = item.select_one('h3.product-title a, .product-title a, a.ga-title')
                     if not link:
                         link = item.select_one('a[href*="/prodaja-stanova/"]')
@@ -217,20 +226,16 @@ def scrape_halooglasi(config):
                     href = link.get('href', '')
                     raw_id = href.rstrip('/').split('/')[-1].split('?')[0]
                     listing_id = f"halo_{raw_id}"
-
                     title = link.get_text(strip=True) or f"Stan - {location_name}"
 
-                    # Cena
                     price = None
                     price_el = item.select_one('.price-box-main, [class*="price-main"]')
                     if price_el:
                         price = parse_price(price_el.get_text())
 
-                    # Površina iz features liste
                     area = None
                     for feat in item.select('.product-features li, .features-container li'):
-                        txt = feat.get_text(strip=True)
-                        a = parse_area(txt)
+                        a = parse_area(feat.get_text(strip=True))
                         if a:
                             area = a
                             break
@@ -261,120 +266,26 @@ def scrape_halooglasi(config):
     return results
 
 # ============================================================
-# SCRAPER: NEKRETNINE.RS
-# ============================================================
-
-NEKRETNINE_LOCATION_SLUGS = [
-    ('novi-beograd', 'Novi Beograd'),
-    ('zemun', 'Zemun'),
-    ('ledine', 'Ledine'),
-    ('bezanija', 'Bezanija'),
-]
-
-def scrape_nekretnine(config):
-    results = []
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    for slug, location_name in NEKRETNINE_LOCATION_SLUGS:
-        url = f"https://www.nekretnine.rs/stambeni-objekti/stanovi/{slug}/lista/?sort=new"
-        logger.info(f"[Nekretnine.rs] {url}")
-        try:
-            r = session.get(url, timeout=20, verify=SSL_VERIFY)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, 'html.parser')
-
-            # Probaj različite selektore
-            items = (
-                soup.select('article.real-estate-item') or
-                soup.select('li.real-estate-item') or
-                soup.select('[class*="property-item"]') or
-                soup.select('.offer-body')
-            )
-            logger.info(f"[Nekretnine.rs] {location_name}: {len(items)} oglasa")
-
-            for item in items:
-                try:
-                    link = item.select_one('a[href*="/stan"]') or item.select_one('a[href]')
-                    if not link:
-                        continue
-                    href = link.get('href', '')
-                    raw_id = href.rstrip('/').split('/')[-1].split('?')[0]
-                    listing_id = f"nek_{raw_id}"
-
-                    title_el = item.select_one('h2, h3, .offer-title, [class*="title"]')
-                    title = title_el.get_text(strip=True) if title_el else f"Stan - {location_name}"
-
-                    # Cena
-                    price = None
-                    price_el = item.select_one('[class*="price"]')
-                    if price_el:
-                        price = parse_price(price_el.get_text())
-
-                    # Površina
-                    area = None
-                    for sel in ['[class*="size"]', '[class*="area"]', '[class*="kvadrat"]', 'li', 'span']:
-                        for el in item.select(sel):
-                            a = parse_area(el.get_text())
-                            if a:
-                                area = a
-                                break
-                        if area:
-                            break
-                    if not area:
-                        area = parse_area(item.get_text())
-
-                    ppm2 = calc_ppm2(price, area)
-                    full_url = href if href.startswith('http') else f"https://www.nekretnine.rs{href}"
-
-                    results.append({
-                        'id': listing_id,
-                        'title': title,
-                        'location': location_name,
-                        'price': price,
-                        'area': area,
-                        'price_per_m2': ppm2,
-                        'url': full_url,
-                        'source': 'Nekretnine.rs',
-                    })
-                except Exception as e:
-                    logger.debug(f"[Nekretnine.rs] oglas greška: {e}")
-
-        except Exception as e:
-            logger.error(f"[Nekretnine.rs] greška za {slug}: {e}")
-
-        time.sleep(2)
-
-    return results
-
-# ============================================================
-# SCRAPER: 4ZIDA.RS (JSON API)
+# SCRAPER: 4ZIDA.RS (JSON API) — fix: urllib da ne enkodira []
 # ============================================================
 
 def scrape_4zida(config):
     results = []
-    session = requests.Session()
-    session.headers.update({**HEADERS, 'Accept': 'application/json'})
 
-    # 4zida ima javni API
-    # Lokacije: Novi Beograd = placeId 638, Zemun = 630
-    # Bezanija i Ledine su delovi Novog Beograda
     place_configs = [
         (638, 'Novi Beograd'),
         (630, 'Zemun'),
     ]
 
     for place_id, location_name in place_configs:
+        # Koristimo urllib direktno — requests re-enkodira [] u %5B%5D što API ne prihvata
         api_url = (
             f"https://api.4zida.rs/v6/search/apartments"
             f"?for=sale&placeIds[]={place_id}&sort=-createdAt&page=1&limit=40"
         )
         logger.info(f"[4zida.rs] {api_url}")
         try:
-            r = session.get(api_url, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-
+            data = fetch_json(api_url)
             ads = data.get('ads', data.get('results', data if isinstance(data, list) else []))
             logger.info(f"[4zida.rs] {location_name}: {len(ads)} oglasa")
 
@@ -386,7 +297,6 @@ def scrape_4zida(config):
                     price = ad.get('price') or ad.get('totalPrice')
                     area = ad.get('m2') or ad.get('size')
 
-                    # Lokacija
                     addr = ad.get('address', {}) or {}
                     city_part = addr.get('cityPart', {}) or {}
                     street = addr.get('street', {}) or {}
@@ -394,18 +304,16 @@ def scrape_4zida(config):
                     st_name = street.get('name', '') if isinstance(street, dict) else ''
                     location_str = f"{nb_name}, {st_name}".strip(', ')
 
-                    # Sobnost
                     structure = ad.get('structure', {}) or {}
                     rooms = structure.get('name', '') if isinstance(structure, dict) else str(structure)
 
                     ppm2 = calc_ppm2(price, area)
 
-                    # URL
                     slug = ad.get('slug', '') or ad.get('url', '')
-                    if slug:
-                        full_url = f"https://4zida.rs/{slug}" if not slug.startswith('http') else slug
-                    else:
-                        full_url = f"https://4zida.rs/stan-na-prodaju/{ad_id}"
+                    full_url = (
+                        f"https://4zida.rs/{slug}" if slug and not slug.startswith('http')
+                        else slug or f"https://4zida.rs/stan-na-prodaju/{ad_id}"
+                    )
 
                     title = ad.get('title') or f"Stan {area}m² – {nb_name}"
 
@@ -428,38 +336,6 @@ def scrape_4zida(config):
 
         time.sleep(2)
 
-    # Fallback: HTML ako API ne radi
-    if not results:
-        logger.info("[4zida.rs] Probam HTML fallback...")
-        for slug, location_name in [('novi-beograd', 'Novi Beograd'), ('zemun', 'Zemun')]:
-            try:
-                session.headers.update({'Accept': 'text/html'})
-                r = session.get(f"https://4zida.rs/prodaja-stanova/{slug}", timeout=20)
-                soup = BeautifulSoup(r.text, 'html.parser')
-                for item in soup.select('[class*="Card"], article, [class*="listing"]'):
-                    link = item.select_one('a[href*="/stan"], a[href*="/prodaja"]')
-                    if not link:
-                        continue
-                    href = link.get('href', '')
-                    raw_id = href.rstrip('/').split('/')[-1]
-                    text = item.get_text()
-                    price = parse_price(re.search(r'[\d\.]+\s*€', text).group(0) if re.search(r'[\d\.]+\s*€', text) else '')
-                    area = parse_area(text)
-                    ppm2 = calc_ppm2(price, area)
-                    results.append({
-                        'id': f"4zida_{raw_id}",
-                        'title': f"Stan – {location_name}",
-                        'location': location_name,
-                        'price': price,
-                        'area': area,
-                        'price_per_m2': ppm2,
-                        'url': f"https://4zida.rs{href}" if href.startswith('/') else href,
-                        'source': '4zida.rs',
-                    })
-            except Exception as e:
-                logger.error(f"[4zida.rs] HTML fallback greška: {e}")
-            time.sleep(2)
-
     return results
 
 # ============================================================
@@ -468,8 +344,6 @@ def scrape_4zida(config):
 
 def scrape_cityexpert(config):
     results = []
-    session = requests.Session()
-    session.headers.update({**HEADERS, 'Accept': 'application/json', 'Referer': 'https://cityexpert.rs/'})
 
     # Municipality IDs: Novi Beograd = 7, Zemun = 16
     municipalities = [
@@ -478,24 +352,16 @@ def scrape_cityexpert(config):
     ]
 
     for mun_id, location_name in municipalities:
-        api_url = "https://cityexpert.rs/api/Search/"
-        params = {
-            'ptId': 1,           # tip: stan
-            'cityId': 1,         # grad: Beograd
-            'rentOrSale': 's',   # prodaja
-            'currentPage': 1,
-            'resultsPerPage': 50,
-            'sort': 'datedesc',
-            'municipalities[]': mun_id,
-        }
-        logger.info(f"[City Expert] {api_url} municipalityId={mun_id}")
+        # Pokušaj novi API format
+        api_url = (
+            f"https://cityexpert.rs/api/Search/"
+            f"?ptId=1&cityId=1&rentOrSale=s&currentPage=1"
+            f"&resultsPerPage=50&sort=datedesc&municipality={mun_id}"
+        )
+        logger.info(f"[City Expert] municipalityId={mun_id}")
         try:
-            r = session.get(api_url, params=params, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-
-            # City Expert response: {"result": [...], "info": {...}}
-            ads = data.get('result', data.get('results', []))
+            data = fetch_json(api_url, extra_headers={'Referer': 'https://cityexpert.rs/'})
+            ads = data.get('result', data.get('results', data.get('data', [])))
             logger.info(f"[City Expert] {location_name}: {len(ads)} oglasa")
 
             for ad in ads:
@@ -506,7 +372,6 @@ def scrape_cityexpert(config):
                     price = ad.get('price') or ad.get('totalPrice')
                     area = ad.get('size') or ad.get('m2')
 
-                    # Lokacija
                     mun_info = ad.get('municipality', {}) or {}
                     mun_name = mun_info.get('title', location_name) if isinstance(mun_info, dict) else location_name
                     micro = ad.get('microlocation', {}) or {}
@@ -572,10 +437,8 @@ def main():
     logger.info(f"💶 Max cena/m²: {max_ppm2} €")
     logger.info(f"👁️  Već viđeno: {len(seen)} oglasa")
 
-    # ── Pokretanje svakog scrapera ──────────────────────────
     scrapers = [
         ('Halo Oglasi', scrape_halooglasi),
-        ('Nekretnine.rs', scrape_nekretnine),
         ('4zida.rs', scrape_4zida),
         ('City Expert', scrape_cityexpert),
     ]
@@ -589,9 +452,8 @@ def main():
         except Exception as e:
             logger.error(f"✘ {name} pao: {e}")
 
-    logger.info(f"\n📦 Ukupno: {len(all_listings)} oglasa | Novi: ?")
+    logger.info(f"\n📦 Ukupno: {len(all_listings)} oglasa")
 
-    # ── Filtriranje i notifikacije ──────────────────────────
     new_total = 0
     sent_total = 0
 
@@ -622,7 +484,7 @@ def main():
                 ok = send_telegram(telegram_token, telegram_chat_id, msg)
                 if ok:
                     sent_total += 1
-                    time.sleep(1.5)  # anti-spam
+                    time.sleep(1.5)
 
     logger.info(f"\n📊 Rezultati:")
     logger.info(f"   Novi oglasi: {new_total}")
@@ -635,7 +497,6 @@ def main():
 if __name__ == '__main__':
     import sys
 
-    # --test-telegram : samo pošalji test poruku i izađi
     if '--test-telegram' in sys.argv:
         config = load_config()
         token = config.get('telegram_token', '')
@@ -648,20 +509,17 @@ if __name__ == '__main__':
             print("✅ Poruka poslata!" if ok else "❌ Greška pri slanju!")
         sys.exit(0)
 
-    # --clear-seen : resetuj listu viđenih oglasa
     if '--clear-seen' in sys.argv:
         save_seen(set())
         print("✅ seen.json je obrisan — sledeći run će poslati sve oglase koji prođu filter.")
         sys.exit(0)
 
-    # --debug : pokreni scraper ali prikaži SVE oglase (bez Telegrama) da vidiš šta se nalazi
     if '--debug' in sys.argv:
         config = load_config()
         max_ppm2 = int(config.get('max_price_per_m2', 1500))
         targets = config.get('target_locations', ['Novi Beograd', 'Zemun', 'Ledine', 'Bezanija'])
         scrapers = [
             ('Halo Oglasi', scrape_halooglasi),
-            ('Nekretnine.rs', scrape_nekretnine),
             ('4zida.rs', scrape_4zida),
             ('City Expert', scrape_cityexpert),
         ]
@@ -676,16 +534,15 @@ if __name__ == '__main__':
         print(f"\n{'='*60}")
         print(f"Ukupno nađeno: {len(all_listings)} oglasa")
         matches = [l for l in all_listings if
-                   is_target_location(l.get('location',''), targets) and
+                   is_target_location(l.get('location', ''), targets) and
                    is_good_price(l.get('price_per_m2'), max_ppm2)]
         print(f"Prolazi filter (lokacija + cena ≤ {max_ppm2}€/m²): {len(matches)}")
         print(f"{'='*60}")
         for l in matches:
-            print(f"  [{l['source']}] {l['title']} | {l.get('price_per_m2',0):.0f}€/m² | {l['url']}")
+            print(f"  [{l['source']}] {l['title']} | {l.get('price_per_m2', 0):.0f}€/m² | {l['url']}")
         if not matches:
-            # Prikaži distribuciju cena da vidiš zašto ne prolaze
             print("\nNema oglasa koji prolaze filter. Distribucija cena/m²:")
-            loc_listings = [l for l in all_listings if is_target_location(l.get('location',''), targets)]
+            loc_listings = [l for l in all_listings if is_target_location(l.get('location', ''), targets)]
             print(f"  Oglasi u traženim lokacijama: {len(loc_listings)}")
             prices = [l['price_per_m2'] for l in loc_listings if l.get('price_per_m2')]
             if prices:

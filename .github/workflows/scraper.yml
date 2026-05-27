@@ -1,0 +1,47 @@
+name: Scraper Stanovi Beograd
+
+on:
+  schedule:
+    # Svakih 30 minuta od 08:00 do 00:00 po beogradskom vremenu (UTC+2 leti)
+    # UTC: 06:00–22:00  →  Beograd: 08:00–00:00
+    - cron: '0,30 6-22 * * *'
+
+  # Omogućava ručno pokretanje iz GitHub-a (Actions tab → Run workflow)
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Potrebno da bi mogao da commituje seen.json
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Podesi Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instaliraj zavisnosti
+        run: pip install -r requirements.txt
+
+      - name: Pokreni scraper
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_PRICE_PER_M2: '1500'
+        run: python scraper.py
+
+      - name: Sačuvaj seen.json u repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+          git diff --staged --quiet || git commit -m "chore: update seen.json [skip ci]"
+          git pull --rebase origin main
+          git push
