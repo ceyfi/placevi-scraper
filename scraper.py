@@ -405,26 +405,35 @@ def scrape_4zida(config):
     return results
 
 # ============================================================
-# SCRAPER: CITY EXPERT (API)
+# SCRAPER: CITY EXPERT (novi API format: ?req=JSON)
 # ============================================================
 
 def scrape_cityexpert(config):
     """
-    Dohvati stanove na prodaju u Beogradu bez filtera po opštini.
-    Izbegavamo municipalities[] koji vraća 500 grešku.
+    City Expert novi API: GET /api/Search?req={JSON}
     """
+    import urllib.parse
     results = []
-    api_url = (
-        "https://cityexpert.rs/api/Search/"
-        "?ptId=1&cityId=1&rentOrSale=s&currentPage=1&resultsPerPage=60&sort=datedesc"
-    )
+
+    req_params = {
+        "cityId": 1,
+        "rentOrSale": "s",
+        "searchSource": "regular",
+        "sort": "datedsc",
+        "currentPage": 1,
+        "resultsPerPage": 60,
+    }
+    req_json = json.dumps(req_params, separators=(',', ':'))
+    api_url = f"https://cityexpert.rs/api/Search?req={urllib.parse.quote(req_json)}"
     logger.info(f"[City Expert] {api_url}")
+
     try:
         data = fetch_json(api_url, extra_headers={
             'Accept': 'application/json, text/plain, */*',
             'Origin': 'https://cityexpert.rs',
-            'Referer': 'https://cityexpert.rs/',
+            'Referer': 'https://cityexpert.rs/prodaja-nekretnina/beograd',
         })
+
         ads = data.get('result', data.get('results', data.get('data', [])))
         logger.info(f"[City Expert] Beograd: {len(ads)} oglasa")
 
@@ -473,6 +482,105 @@ def scrape_cityexpert(config):
     return results
 
 # ============================================================
+# SCRAPER: NEKRETNINE.RS (HTML)
+# ============================================================
+
+def scrape_nekretnine(config):
+    """
+    Scrape nekretnine.rs — podaci su u __NEXT_DATA__ JSON-u unutar HTML-a.
+    URL: /prodaja-stanova/beograd/?pag={page}, sortiranje po najnovijem.
+    Lokacija: properties[0].location.macrozone / microzone
+    """
+    results = []
+    targets = config.get('target_locations', ['Novi Beograd', 'Zemun', 'Ledine', 'Bezanija'])
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update({
+        **HEADERS,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    })
+
+    # Scrape prvih 5 strana (125 oglasa) sortiranih po najnovijem
+    MAX_PAGES = 5
+
+    for page in range(1, MAX_PAGES + 1):
+        if page == 1:
+            url = "https://www.nekretnine.rs/prodaja-stanova/beograd/"
+        else:
+            url = f"https://www.nekretnine.rs/prodaja-stanova/beograd/?pag={page}"
+
+        logger.info(f"[Nekretnine.rs] strana {page}: {url}")
+        try:
+            r = session.get(url, timeout=20, verify=SSL_VERIFY)
+            if r.status_code != 200:
+                logger.warning(f"[Nekretnine.rs] status {r.status_code}")
+                break
+
+            import re as _re
+            m = _re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, _re.DOTALL)
+            if not m:
+                logger.warning("[Nekretnine.rs] Nema __NEXT_DATA__")
+                break
+
+            page_data = json.loads(m.group(1))
+            query_data = page_data['props']['pageProps']['dehydratedState']['queries'][0]['state']['data']
+            listings_raw = query_data.get('results', [])
+
+            logger.info(f"[Nekretnine.rs] strana {page}: {len(listings_raw)} oglasa")
+            if not listings_raw:
+                break
+
+            for item in listings_raw:
+                try:
+                    re_data = item.get('realEstate', {})
+                    seo = item.get('seo', {})
+
+                    listing_id = f"nek_{re_data.get('id', '')}"
+                    price = re_data.get('price', {}).get('value')
+                    props = (re_data.get('properties') or [{}])[0]
+                    location = props.get('location', {})
+
+                    # Lokacija: macrozone + microzone
+                    macrozone = location.get('macrozone', '')
+                    microzone = location.get('microzone', '')
+                    location_str = ', '.join(filter(None, [macrozone, microzone, location.get('city', '')]))
+
+                    # Filter po lokaciji
+                    if not any(t.lower() in location_str.lower() for t in targets):
+                        continue
+
+                    # Površina: "114 m²"
+                    surface_str = props.get('surface', '')
+                    area = parse_area(surface_str)
+
+                    ppm2 = calc_ppm2(price, area)
+                    full_url = seo.get('url', f"https://www.nekretnine.rs/oglasi/{re_data.get('id', '')}/")
+                    title = seo.get('anchor', props.get('caption', f"Stan – {macrozone}"))
+
+                    results.append({
+                        'id': listing_id,
+                        'title': title,
+                        'location': location_str,
+                        'price': price,
+                        'area': area,
+                        'price_per_m2': ppm2,
+                        'url': full_url,
+                        'source': 'Nekretnine.rs',
+                        'rooms': props.get('rooms', ''),
+                    })
+                except Exception as e:
+                    logger.debug(f"[Nekretnine.rs] oglas greška: {e}")
+
+        except Exception as e:
+            logger.error(f"[Nekretnine.rs] greška strana {page}: {e}")
+            break
+
+        time.sleep(2)
+
+    logger.info(f"[Nekretnine.rs] Ukupno u traženim lokacijama: {len(results)}")
+    return results
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -503,6 +611,7 @@ def main():
         # Halo Oglasi je uklonjen — blokira GitHub Actions IP (403)
         ('4zida.rs', scrape_4zida),
         ('City Expert', scrape_cityexpert),
+        ('Nekretnine.rs', scrape_nekretnine),
     ]
 
     all_listings = []
@@ -590,6 +699,7 @@ if __name__ == '__main__':
             ('Halo Oglasi', scrape_halooglasi),
             ('4zida.rs', scrape_4zida),
             ('City Expert', scrape_cityexpert),
+            ('Nekretnine.rs', scrape_nekretnine),
         ]
         all_listings = []
         for name, fn in scrapers:
