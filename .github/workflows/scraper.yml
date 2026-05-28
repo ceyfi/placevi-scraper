@@ -9,6 +9,10 @@ on:
   # Omogućava ručno pokretanje iz GitHub-a (Actions tab → Run workflow)
   workflow_dispatch:
 
+concurrency:
+  group: scraper
+  cancel-in-progress: false   # Čekaj da prethodni završi, ne otkazuj ga
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
