@@ -644,7 +644,8 @@ def main():
 
         loc_ok = is_target_location(listing.get('location', ''), targets)
         price_ok = is_good_price(listing.get('price_per_m2'), max_ppm2)
-        total_ok = max_total is None or (listing.get('price') or 0) <= max_total
+        price_val = listing.get('price')
+        total_ok = max_total is None or (price_val is not None and price_val <= max_total)
 
         if loc_ok and price_ok and total_ok:
             ppm2 = listing.get('price_per_m2', 0)
