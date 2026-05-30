@@ -595,8 +595,9 @@ def main():
 
     telegram_token = config.get('telegram_token', '')
     telegram_chat_id = config.get('telegram_chat_id', '')
-    max_ppm2 = int(config.get('max_price_per_m2', 1500))
-    targets = config.get('target_locations', ['Novi Beograd', 'Zemun', 'Ledine', 'Bezanija'])
+    max_ppm2 = int(config.get('max_price_per_m2', 2000))
+    max_total = config.get('max_total_price', None)
+    targets = config.get('target_locations', ['Beograd'])
 
     if not telegram_token:
         logger.warning("⚠️  Telegram token nije podešen!")
@@ -643,8 +644,9 @@ def main():
 
         loc_ok = is_target_location(listing.get('location', ''), targets)
         price_ok = is_good_price(listing.get('price_per_m2'), max_ppm2)
+        total_ok = max_total is None or (listing.get('price') or 0) <= max_total
 
-        if loc_ok and price_ok:
+        if loc_ok and price_ok and total_ok:
             ppm2 = listing.get('price_per_m2', 0)
             logger.info(
                 f"🎯 MATCH: [{listing['source']}] {listing['title']} | "
