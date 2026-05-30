@@ -655,9 +655,11 @@ def main():
             )
             if telegram_token and telegram_chat_id:
                 msg = format_message(listing)
-                ok = send_telegram(telegram_token, telegram_chat_id, msg)
-                if ok:
-                    sent_total += 1
+                all_chat_ids = [telegram_chat_id] + config.get('telegram_extra_chat_ids', [])
+                for cid in all_chat_ids:
+                    ok = send_telegram(telegram_token, cid, msg)
+                    if ok:
+                        sent_total += 1
                     time.sleep(1.5)
 
     logger.info(f"\n📊 Rezultati:")

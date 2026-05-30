@@ -2,9 +2,9 @@ name: Scraper Stanovi Beograd
 
 on:
   schedule:
-    # Svakih 30 minuta od 08:00 do 00:00 po beogradskom vremenu (UTC+2 leti)
+    # Svaki sat od 08:00 do 00:00 po beogradskom vremenu (UTC+2 leti)
     # UTC: 06:00–22:00  →  Beograd: 08:00–00:00
-    - cron: '0,30 6-22 * * *'
+    - cron: '0 6-22 * * *'
 
   # Omogućava ručno pokretanje iz GitHub-a (Actions tab → Run workflow)
   workflow_dispatch:
