@@ -213,7 +213,11 @@ def fetch_json(url, extra_headers=None):
 # ============================================================
 
 # Jedan URL za sve lokacije: Novi Beograd, Zemun, Ledine, Bezanija
-HALO_URL = "https://www.halooglasi.com/nekretnine/prodaja-stanova/beograd?sort=ValidFromMoment_desc"
+HALO_URL = (
+    "https://www.halooglasi.com/nekretnine/prodaja-stanova"
+    "?grad_id_l-lokacija_id_l-mikrolokacija_id_l=40574,40787,535592,55297,538989,525206,525208,525211,40776,40772,40784"
+    "&sort=ValidFromMoment_desc"
+)
 
 def scrape_halooglasi(config):
     results = []
