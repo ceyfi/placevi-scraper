@@ -1,4 +1,4 @@
-name: Scraper Stanovi Beograd
+name: Scraper Placevi Beograd
 
 on:
   schedule:
@@ -36,10 +36,12 @@ jobs:
 
       - name: Pokreni scraper
         env:
+          # VAŽNO: ovo je NOVI, poseban bot samo za placeve — TELEGRAM_TOKEN i
+          # TELEGRAM_CHAT_ID secrets ovde MORAJU biti drugačiji od "stanovi" repoa.
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_EXTRA_CHAT_IDS: ${{ secrets.TELEGRAM_EXTRA_CHAT_IDS }}
-          MAX_PRICE_PER_M2: '2000'
+          MAX_TOTAL_PRICE: '50000'
         run: python scraper.py
 
       - name: Sačuvaj seen.json u repo

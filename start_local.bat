@@ -1,6 +1,6 @@
 @echo off
 echo ===================================
-echo  Scraper stanovi - lokalno testiranje
+echo  Scraper placevi - lokalno testiranje
 echo ===================================
 
 REM Proveri da li postoji Python
